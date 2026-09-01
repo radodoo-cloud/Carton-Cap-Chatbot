@@ -1,613 +1,753 @@
-# Technical Specification — Carton Caps AI Chat Agent
+Technical Specification — Carton Caps AI Chat Agent
+Deliverable #1: Conversational AI Design + LLM Strategy
 
-**Deliverable #1: Conversational AI Design + LLM Strategy**
 
----
+Table of Contents
+Overview & Point of View
+API Contract
+System Diagrams
+Mobile Integration
+LLM Strategy & Reasoning
+Conversation Design Principles
+Privacy Considerations
+Trade-offs & Alternatives Considered
+Evolution Roadmap
 
-## Table of Contents
 
-1. [Overview & Point of View](#1-overview--point-of-view)
-2. [API Contract](#2-api-contract)
-3. [System Diagrams](#3-system-diagrams)
-4. [Mobile Integration](#4-mobile-integration)
-5. [LLM Strategy & Reasoning](#5-llm-strategy--reasoning)
-6. [Conversation Design Principles](#6-conversation-design-principles)
-7. [Privacy Considerations](#7-privacy-considerations)
-8. [Trade-offs & Alternatives Considered](#8-trade-offs--alternatives-considered)
-9. [Evolution Roadmap](#9-evolution-roadmap)
+1. Overview & Point of View
+Capper is meant to do one job well, not everything. That single idea shaped every decision in this document.
 
----
+When someone opens the Carton Caps chat, they almost always want one of two things: help finding products that support their school, or help understanding how the referral program works. They're not looking to chat for the sake of chatting. So Capper is built to be quick, to be right within those two areas, and to say plainly when something is outside what it can help with — rather than guessing and risking a wrong or off-brand answer.
 
-## 1. Overview & Point of View
+The guiding rule behind the whole design is simple: the model is kept on a short leash. It's not trusted to know things on its own.
 
-Capper is a scoped, task-oriented chat agent — not a general-purpose assistant. That distinction drove every design decision in this spec.
+The AI model (GPT-4o-mini) is only used to turn real information into a natural-sounding reply — it's a communicator, not a source of truth. Anything Capper says about a product or the referral program comes from data the system actually looked up, never from what the model happens to "remember." That one choice is the backbone of the whole design.
 
-Carton Caps users open the app with a specific goal: find products that support their school, or understand how the referral program works. They are not looking for open-ended conversation. This means the agent should be fast, accurate within its domain, and honest about what it cannot help with — rather than attempting to answer everything and risking hallucination or off-brand responses.
 
-The core design philosophy is: **constrain the LLM, don't trust it blindly.**
+2. API Contract
+The API is a standard REST service — every request and response is JSON, and it follows a simple, resource-based URL pattern.
 
-The LLM (GPT-4o-mini) is used as a language layer — it formats and communicates information retrieved from trusted sources (the product database and the FAQ file). It is not used as a knowledge source itself. Every response is grounded in data the system controls. This is the most important architectural decision in the project.
+Base URL: http://localhost:8000 API Version: v1
 
----
 
-## 2. API Contract
-
-The API follows REST conventions with a resource-oriented URL structure. All requests and responses use JSON.
-
-**Base URL:** `http://localhost:8000`
-**API Version:** `v1`
-
----
-
-### 2.1 Endpoints
-
-#### `POST /v1/chat/conversations`
-
-Creates a new conversation session and returns Capper's opening greeting.
-
-**Request**
-```json
-{
-  "entry_point": "home_widget"
-}
-```
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `entry_point` | string | No | `home_widget` | Surface in the app where the chat was opened. Used for analytics and future context-aware greetings. |
-
-**Response `200`**
-```json
-{
-  "conversation_id": "c_3f9a1b2c",
-  "greeting": "Hi! I am Capper. I can help you find products that support your school!"
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `conversation_id` | string | Unique session ID. Must be included in all subsequent message requests. |
-| `greeting` | string | Capper's opening message. |
-
----
-
-#### `POST /v1/chat/conversations/{conversation_id}/messages`
-
-Sends a user message and returns Capper's response.
-
-**Path Parameters**
-| Parameter | Type | Description |
-|---|---|---|
-| `conversation_id` | string | ID returned from `POST /v1/chat/conversations` |
-
-**Request**
-```json
-{
-  "content": "What snacks support my school?"
-}
-```
-
-| Field | Type | Required | Constraints | Description |
-|---|---|---|---|---|
-| `content` | string | Yes | 1–1000 characters | The user's message |
-
-**Response `200`**
-```json
-{
-  "message_id": "m_7c4d2e1f",
-  "role": "assistant",
-  "intent": "PRODUCT_QUERY",
-  "reply": "Here are some snacks from our catalog that support your school:\n- Granola Cereal Bars — $5.92\n- Frosted Flakes Cereal — $3.79",
-  "retrieved_data": [
-    { "id": 2, "name": "Granola Cereal Bars", "price": 5.92 },
-    { "id": 1, "name": "Frosted Flakes Cereal", "price": 3.79 }
-  ]
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `message_id` | string | Unique ID of the assistant's message |
-| `role` | string | Always `"assistant"` |
-| `intent` | string | Classified intent: `PRODUCT_QUERY`, `FAQ_QUERY`, or `GENERAL` |
-| `reply` | string | Capper's natural language response |
-| `retrieved_data` | array | Raw data used to ground the response. Empty array for `GENERAL` intent. |
-
-**Error Responses**
-
-| Status | Cause | Detail |
-|---|---|---|
-| `400` | Empty message | `"Message content cannot be empty."` |
-| `400` | Message too long | `"Message exceeds maximum allowed length."` |
-| `400` | FAQ guardrail blocked | `"I can only answer questions about the Carton Caps referral program..."` |
-| `404` | Conversation not found | `"Conversation not found"` |
-
-All errors use the format:
-```json
-{ "detail": "<reason>" }
-```
-
----
-
-### 2.2 Intent Classification
-
-Every message is classified into one of three intents before retrieval or generation occurs.
-
-| Intent | Trigger | Retriever | Output Guardrail |
-|---|---|---|---|
-| `PRODUCT_QUERY` | Keywords: product, buy, snack, cereal, food, granola, etc. | SQLRetriever → Products table | OutputGuardrail |
-| `FAQ_QUERY` | Keywords: referral, invite, bonus, code, friend, reward, etc. | FAQRetriever → faqs.txt | FAQGuardrail |
-| `GENERAL` | No keyword match | None | OutputGuardrail |
-
----
-
-### 2.3 Conversation Lifecycle
-
-```
+2.1 Endpoints
 POST /v1/chat/conversations
+Starts a new chat session and returns Capper's opening message.
+
+Request
+
+{
+
+  "entry_point": "home_widget"
+
+}
+
+Field
+Type
+Required
+Default
+What it's for
+entry_point
+string
+No
+home_widget
+Where in the app the chat was opened from. Useful later for tailoring the greeting and for basic analytics.
+
+
+Response 200
+
+{
+
+  "conversation_id": "c_3f9a1b2c",
+
+  "greeting": "Hi! I am Capper. I can help you find products that support your school!"
+
+}
+
+Field
+Type
+What it's for
+conversation_id
+string
+The session's ID — the app needs to send this with every message that follows.
+greeting
+string
+Capper's first message.
+
+
+
+POST /v1/chat/conversations/{conversation_id}/messages
+Sends one user message and gets Capper's reply back.
+
+Path Parameters | Parameter | Type | What it's for | |---|---|---| | conversation_id | string | The ID handed back when the conversation was created |
+
+Request
+
+{
+
+  "content": "What snacks support my school?"
+
+}
+
+Field
+Type
+Required
+Limits
+What it's for
+content
+string
+Yes
+1–1000 characters
+The user's message
+
+
+Response 200
+
+{
+
+  "message_id": "m_7c4d2e1f",
+
+  "role": "assistant",
+
+  "intent": "PRODUCT_QUERY",
+
+  "reply": "Here are some snacks from our catalog that support your school:\n- Granola Cereal Bars — $5.92\n- Frosted Flakes Cereal — $3.79",
+
+  "retrieved_data": [
+
+    { "id": 2, "name": "Granola Cereal Bars", "price": 5.92 },
+
+    { "id": 1, "name": "Frosted Flakes Cereal", "price": 3.79 }
+
+  ]
+
+}
+
+Field
+Type
+What it's for
+message_id
+string
+ID of Capper's reply
+role
+string
+Always "assistant"
+intent
+string
+What kind of question this was: PRODUCT_QUERY, FAQ_QUERY, or GENERAL
+reply
+string
+Capper's actual reply, in plain language
+retrieved_data
+array
+The real data behind that reply — empty when the question was GENERAL (small talk)
+
+
+Error Responses
+
+Status
+When it happens
+Message
+400
+Empty message
+"Message content cannot be empty."
+400
+Message too long
+"Message exceeds maximum allowed length."
+400
+Question falls outside the referral topic
+"I can only answer questions about the Carton Caps referral program..."
+404
+Conversation doesn't exist
+"Conversation not found"
+
+
+Every error looks like:
+
+{ "detail": "<reason>" }
+
+
+2.2 How a Message Gets Classified
+Before anything else happens, every message is sorted into one of three buckets:
+
+Type of question
+How it's recognized
+Where the answer comes from
+What checks it before it's sent
+PRODUCT_QUERY
+Words like product, buy, snack, cereal, food, granola, etc.
+The Products table
+A check that catches obviously broken replies
+FAQ_QUERY
+Words like referral, invite, bonus, code, friend, reward, etc.
+The referral FAQ document
+A check that the answer actually matches what the FAQ says
+GENERAL
+Doesn't match either list
+Nothing looked up — the model answers on its own
+Same broken-reply check as above
+
+
+
+2.3 How a Conversation Flows
+POST /v1/chat/conversations
+
         │
+
         ▼
-  conversation_id returned
+
+  conversation_id comes back
+
         │
+
         ▼
+
 POST /v1/chat/conversations/{id}/messages  ◄──┐
+
         │                                      │
+
         ▼                                      │
-  reply returned                               │
+
+  reply comes back                             │
+
         │                                      │
+
         └──────── user sends next message ─────┘
-```
 
-Conversations are persistent. All messages (user and assistant) are stored in the database with their intent labels, enabling future history retrieval, analytics, and multi-turn context.
+Every message — from the user and from Capper — is saved, along with which of the three categories it fell into. That's what makes future features possible: pulling up chat history, looking at usage patterns, or eventually letting Capper remember earlier parts of the same conversation.
 
----
 
-## 3. System Diagrams
-
-### 3.1 Component Architecture
-
-```mermaid
+3. System Diagrams
+3.1 How the Pieces Fit Together
 flowchart TD
+
     subgraph Client["Mobile App / API Client"]
+
         APP["Carton Caps App"]
+
     end
 
     subgraph API["API Layer"]
+
         CONV["POST /v1/chat/conversations"]
+
         MSG["POST /{id}/messages"]
+
     end
 
     subgraph Pipeline["Message Pipeline"]
-        IG["InputGuardrail\nValidate + sanitize"]
-        RS["RecommendationService\nClassify intent"]
-        AS["AssistantService\nOrchestrate pipeline"]
-        CTX["ContextService\nBuild system prompt"]
-        LC["LLMClient\nGPT-4o-mini"]
-        OG["OutputGuardrail\nValidate reply"]
+
+        IG["Input check\nclean up + validate the message"]
+
+        RS["Intent classifier\nfigure out what kind of question it is"]
+
+        AS["Orchestrator\nruns the whole pipeline"]
+
+        CTX["Prompt builder\nassembles what the model sees"]
+
+        LC["Model call\nGPT-4o-mini"]
+
+        OG["Output check\ncatch broken or empty replies"]
+
     end
 
-    subgraph Retrieval["Retrieval Layer"]
-        SQL["SQLRetriever\nProducts table"]
-        FAQ["FAQRetriever\nfaqs.txt"]
-        FG["FAQGuardrail\nTopic + overlap check"]
+    subgraph Retrieval["Where facts come from"]
+
+        SQL["Product lookup\nProducts table"]
+
+        FAQ["FAQ lookup\nfaqs.txt"]
+
+        FG["FAQ check\nkeeps referral answers grounded"]
+
     end
 
-    subgraph Storage["Persistence"]
-        REPO["Repository\nCRUD"]
+    subgraph Storage["Storage"]
+
+        REPO["Database layer"]
+
         DB[("SQLite")]
+
     end
 
     APP -->|"create session"| CONV
+
     APP -->|"send message"| MSG
+
     MSG --> IG --> RS --> AS
+
     AS --> SQL
+
     AS --> FG --> FAQ
+
     AS --> CTX --> LC --> OG --> REPO --> DB
+
     CONV --> REPO
-```
 
----
 
-### 3.2 Message Pipeline — Sequence Diagram
-
-```mermaid
+3.2 What Happens for One Message, Step by Step
 sequenceDiagram
-    actor User
-    participant API as messages.py
-    participant IG as InputGuardrail
-    participant RS as RecommendationService
-    participant RET as Retriever (SQL or FAQ)
-    participant FG as FAQGuardrail
-    participant CTX as ContextService
-    participant LLM as LLMClient
-    participant OG as OutputGuardrail
-    participant DB as Repository / SQLite
 
-    User->>API: POST /{id}/messages { content }
-    API->>IG: validate(content)
+    actor User
+
+    participant API as API
+
+    participant IG as Input check
+
+    participant RS as Intent classifier
+
+    participant RET as Product or FAQ lookup
+
+    participant FG as FAQ check
+
+    participant CTX as Prompt builder
+
+    participant LLM as Model call
+
+    participant OG as Output check
+
+    participant DB as Database
+
+    User->>API: sends a message
+
+    API->>IG: clean up + validate
+
     IG-->>API: sanitized text
 
-    API->>RS: classify_intent(text)
+    API->>RS: what kind of question is this?
+
     RS-->>API: PRODUCT_QUERY | FAQ_QUERY | GENERAL
 
-    alt FAQ_QUERY
-        API->>FG: validate_query(text)
-        FG-->>API: allowed or HTTP 400
-        API->>RET: FAQRetriever.fetch(text)
-    else PRODUCT_QUERY
-        API->>RET: SQLRetriever.fetch_data(text)
-    else GENERAL
-        Note over RET: No retrieval
+    alt Referral question
+
+        API->>FG: is this actually about the referral program?
+
+        FG-->>API: yes, or a 400 error if not
+
+        API->>RET: look up the relevant FAQ section
+
+    else Product question
+
+        API->>RET: look up matching products
+
+    else Small talk
+
+        Note over RET: nothing to look up
+
     end
 
-    RET-->>API: facts []
+    RET-->>API: the real facts, if any
 
-    API->>CTX: prepare_context(intent, facts)
-    CTX-->>API: system_prompt
+    API->>CTX: build the prompt using those facts
 
-    API->>LLM: generate(system_prompt, text)
-    LLM-->>API: raw_reply
+    CTX-->>API: finished prompt
 
-    alt FAQ_QUERY
-        API->>FG: validate_response(reply, facts)
-        FG-->>API: clean_reply or fallback
-    else PRODUCT / GENERAL
-        API->>OG: validate(reply)
-        OG-->>API: clean_reply or fallback
+    API->>LLM: ask the model to reply
+
+    LLM-->>API: draft reply
+
+    alt Referral question
+
+        API->>FG: does the reply actually match the FAQ?
+
+        FG-->>API: clean reply, or a safe fallback
+
+    else Product or small talk
+
+        API->>OG: does the reply hold up?
+
+        OG-->>API: clean reply, or a safe fallback
+
     end
 
-    API->>DB: save_message(user)
-    API->>DB: save_message(assistant, intent)
-    API-->>User: ChatMessageResponse
-```
+    API->>DB: save the user's message
 
----
+    API->>DB: save Capper's reply and its category
 
-### 3.3 Data Model
+    API-->>User: final reply
 
-```mermaid
+
+3.3 What's Stored
 erDiagram
+
     CONVERSATIONS {
+
         string id PK "c_xxxxxxxx"
+
         string user_id
+
         string entry_point
+
         datetime created_at
+
     }
+
     MESSAGES {
+
         string id PK "m_xxxxxxxx"
+
         string conversation_id FK
+
         string role "user | assistant"
+
         string content
+
         string intent
+
         datetime created_at
+
     }
+
     PRODUCTS {
+
         int id PK
+
         string name
+
         string description
+
         float price
+
         string created_at
+
     }
 
     CONVERSATIONS ||--o{ MESSAGES : "has many"
-```
 
----
 
-## 4. Mobile Integration
+4. Mobile Integration
+4.1 How the App Talks to This Service
+The Carton Caps app talks to Capper the same way it would talk to any other backend service — plain HTTP calls, no special SDK needed.
 
-### 4.1 Integration Pattern
+The basic flow:
 
-The Carton Caps mobile app (iOS/Android) integrates with the chat agent as a standard REST client. No SDK is required — the app makes two types of HTTP calls.
-
-**Recommended flow:**
-
-```
 App Launch / Chat Widget Opened
+
         │
+
         ▼
+
 POST /v1/chat/conversations
+
 { "entry_point": "home_widget" }
+
         │
+
         ▼
+
 Store conversation_id in local session state
+
         │
+
         ▼
+
 User types message → POST /v1/chat/conversations/{id}/messages
+
         │
+
         ▼
-Render reply in chat UI
-Use retrieved_data to render product cards if intent == PRODUCT_QUERY
-```
 
----
+Show the reply in the chat UI
 
-### 4.2 Entry Points
+If it was a product question, also show product cards using retrieved_data
 
-The `entry_point` field allows the app to tell the API where the chat was opened. This enables context-aware greetings and analytics in the future.
 
-| Entry Point | Surface |
-|---|---|
-| `home_widget` | Home screen chat bubble |
-| `product_page` | Chat opened from a product detail page |
-| `referral_page` | Chat opened from the referral/invite screen |
-| `onboarding` | Chat opened during new user onboarding |
+4.2 Where the Chat Gets Opened From
+The entry_point field just tells the API which screen the chat was opened from. Right now it's used loosely, but it opens the door to smarter greetings later.
 
-A future version of the API could use `entry_point` to pre-seed the conversation with relevant context — e.g. opening from `referral_page` could automatically prime Capper to answer referral questions without the user needing to ask.
+Entry Point
+Where it is in the app
+home_widget
+The chat bubble on the home screen
+product_page
+Opened from a product's detail page
+referral_page
+Opened from the referral/invite screen
+onboarding
+Opened during new-user onboarding
 
----
 
-### 4.3 Rendering `retrieved_data`
+A later version could use this to skip straight to referral help when someone opens the chat from the referral page, instead of waiting for them to type a question first.
 
-The `retrieved_data` array in the message response is intentionally returned as structured data separate from the `reply` string. This allows the mobile app to render rich UI components rather than parsing text.
 
-**Example — Product Query:**
-```json
+4.3 Turning Data Into Real UI
+The retrieved_data field is kept separate from the reply text on purpose — it's the actual data behind what Capper said, meant for the app to turn into real UI rather than something to be parsed out of a sentence.
+
+For a product question:
+
 "retrieved_data": [
+
   { "id": 1, "name": "Frosted Flakes Cereal", "price": 3.79 },
+
   { "id": 2, "name": "Granola Cereal Bars", "price": 5.92 }
+
 ]
-```
 
-The app can use this to render tappable product cards with images, prices, and "Add to Cart" buttons — while `reply` provides the conversational framing text above the cards.
+The app can turn this straight into tappable product cards — image, price, an "Add to Cart" button — while the reply text is just the friendly sentence that introduces them.
 
-**Example — FAQ Query:**
-```json
+For a referral question:
+
 "retrieved_data": [
+
   { "content": "Q: How do I refer a friend?\nA: Share your unique referral link..." }
+
 ]
-```
 
-For FAQ responses, `retrieved_data` can be used to show a "Source" disclosure, building user trust that the answer came from official program documentation.
+Here it can back a small "this came from our official FAQ" note, which helps build trust that the answer isn't made up.
 
----
 
-### 4.4 Authentication
+4.4 Who's Asking
+Right now, every conversation is tied to one placeholder user (user_demo_123) — a stand-in for a real login. In the real app, the mobile client would send its normal login token, and the API would read the actual user from that token rather than trusting anything the app claims about who's asking.
 
-The current implementation uses a hardcoded `user_id` (`user_demo_123`) as a placeholder. In production, the mobile app would pass a JWT or session token in the `Authorization` header, and the API would extract the `user_id` from the verified token rather than trusting a client-supplied value.
-
-```
 Authorization: Bearer <jwt_token>
-```
 
-The `user_id` is stored on the conversation record, enabling per-user conversation history retrieval in a future `GET /v1/chat/conversations` endpoint.
+Once that's wired up, each conversation stays tied to a real person, which is what makes something like "show me my past conversations" possible down the line.
 
----
 
-### 4.5 Suggested Mobile UX Flow
-
-```mermaid
+4.5 What the User Actually Sees, Step by Step
 flowchart TD
+
     A(["User opens app"]) --> B["Chat widget visible on home screen"]
+
     B --> C["User taps widget"]
+
     C --> D["App calls POST /v1/chat/conversations\nentry_point: home_widget"]
+
     D --> E["Capper greeting displayed in chat UI"]
+
     E --> F["User types message"]
+
     F --> G["App calls POST /{id}/messages"]
+
     G --> H{intent in response?}
-    H -->|"PRODUCT_QUERY"| I["Render reply text\n+ product cards from retrieved_data"]
-    H -->|"FAQ_QUERY"| J["Render reply text\n+ source disclosure"]
-    H -->|"GENERAL"| K["Render reply text only"]
+
+    H -->|"PRODUCT_QUERY"| I["Show reply text\n+ product cards"]
+
+    H -->|"FAQ_QUERY"| J["Show reply text\n+ source note"]
+
+    H -->|"GENERAL"| K["Show reply text only"]
+
     I --> F
+
     J --> F
+
     K --> F
-```
 
----
 
-## 5. LLM Strategy & Reasoning
+5. LLM Strategy & Reasoning
+5.1 Why GPT-4o-mini
+Three reasons drove this choice over a bigger model like GPT-4o:
 
-### 5.1 Why GPT-4o-mini
+Speed — People notice lag in a chat window. The smaller model replies noticeably faster, which matters most on mobile where waiting feels worse.
+Cost — At real scale, with potentially thousands of conversations a day, token costs add up fast. The smaller model runs at a fraction of the cost per reply.
+The job doesn't need a bigger brain — Capper's actual work is turning a short list of products or an FAQ answer into a natural sentence. That's well within what a smaller model handles comfortably; it doesn't call for deep reasoning.
 
-GPT-4o-mini was chosen over larger models (GPT-4o, GPT-4-turbo) for three reasons:
+The trade-off is that this model is weaker at complex reasoning and holding long context. That's fine here, because the design never asks it to reason — only to phrase things clearly.
 
-1. **Latency** — Chat agents live or die on response time. GPT-4o-mini returns responses significantly faster than full GPT-4o, which matters when a user is waiting in a mobile chat UI.
-2. **Cost** — At scale, token costs compound quickly. GPT-4o-mini is ~15x cheaper per token than GPT-4o. For a consumer app with potentially thousands of daily conversations, this is a meaningful operational consideration.
-3. **Task fit** — The tasks Capper performs (formatting product lists, paraphrasing FAQ content) do not require the reasoning depth of a larger model. GPT-4o-mini handles them well within the constrained prompt structure used here.
 
-The trade-off is that GPT-4o-mini is weaker at nuanced reasoning and longer context. This is acceptable because the system is designed so the LLM never needs to reason — it only needs to communicate.
+5.2 Why the Model Never Has to "Know" Anything
+The single most important decision here: the model is never asked to answer from what it learned during training. Every real answer comes from one of two places:
 
----
+The Products table, for anything about products
+The referral FAQ document, for anything about the referral program
 
-### 5.2 Grounded Generation (Why the LLM Is Not the Knowledge Source)
+Before the model ever replies, the actual facts are handed to it directly. That one habit is what removes hallucination risk for the two question types that matter most — the model isn't guessing, it's paraphrasing something already known to be true.
 
-The most important LLM design decision is that **the model is never asked to recall facts from its training data.** Every response is grounded in one of two sources:
+For small talk (GENERAL), the model does answer on its own — but that's low-risk, since nothing factual is being claimed.
 
-- The `Products` table in SQLite (for product queries)
-- `data/faqs.txt` (for referral/program questions)
 
-The system prompt explicitly injects the relevant facts before asking the LLM to respond. This eliminates hallucination risk for the two most critical query types. The LLM's job is to take structured data and express it naturally — not to know things.
+5.3 How the Prompt Is Built
+Every prompt sent to the model has three parts:
 
-For `GENERAL` intent (greetings, small talk), the LLM responds from its own capability, but this is low-risk because no factual claims are being made.
+Who it is — "You are Capper, a helpful assistant for the Carton Caps app."
+What kind of question this is — so the model knows whether it's talking about products or referrals.
+The actual facts — whatever was looked up for this specific question.
 
----
+The model is never told "answer anything the user asks" — it's handed one specific, narrow task with the exact data it needs to do it.
 
-### 5.3 Prompt Design
+Temperature: 0.7 — enough room for the phrasing to feel natural without becoming unpredictable. If this were something more sensitive to get exactly right every time, a lower value (0.3–0.5) would make more sense.
 
-The system prompt is built dynamically per request with three components:
+Max reply length: 300 tokens — plenty for a short answer with a product list or FAQ snippet, while keeping replies from running on and keeping costs predictable.
 
-1. **Identity** — "You are Capper, a helpful assistant for the Carton Caps app."
-2. **Intent scope** — Tells the model what kind of question it is answering.
-3. **Injected facts** — Product rows or FAQ sections retrieved from trusted sources.
 
-This structure keeps the prompt minimal and focused. The model is not given open-ended instructions like "answer any question the user has" — it is given a specific task with specific data.
+5.4 The Safety Checks
+Four checks run at different points, each catching a different kind of problem:
 
-**Temperature: 0.7** — Allows natural variation in phrasing without producing unpredictable outputs. A lower temperature (0.3–0.5) would be appropriate if responses needed to be more deterministic (e.g. for compliance-sensitive content).
+Check
+When it runs
+What it catches
+Input check
+Before anything else
+Malformed or abusive messages, stopped before they go any further
+Referral topic check
+Before looking anything up
+Questions that aren't actually about the referral program, stopped before reaching the model
+Referral answer check
+After the model replies
+Makes sure the reply actually matches what the FAQ says
+General reply check
+After the model replies
+Catches obviously broken replies — empty, too short, nonsensical
 
-**Max tokens: 300** — Sufficient for a conversational reply with a short product list or FAQ answer. Prevents runaway responses and controls cost.
 
----
+The referral checks matter most. Capper is not allowed to guess about the referral program. If a reply doesn't clearly match what the FAQ actually says, it gets replaced with a safe, honest fallback instead. That's a deliberately cautious choice — a wrong answer about a bonus is the kind of mistake that costs real user trust, so it's worth being conservative here even at the cost of an occasional "I'm not sure" response.
 
-### 5.4 Guardrail Strategy
 
-Three guardrails operate at different stages of the pipeline:
+6. Conversation Design Principles
+6.1 Who Capper Is
+Capper is meant to feel friendly, to the point, and clearly focused on one job — an approachable, mascot-style helper rather than a general-purpose chatbot, since the audience includes families and students.
 
-| Guardrail | Stage | Purpose |
-|---|---|---|
-| `InputGuardrail` | Pre-classification | Reject malformed or abusive input before any processing occurs |
-| `FAQGuardrail.validate_query` | Pre-retrieval | Block questions outside the referral program scope before calling the LLM |
-| `FAQGuardrail.validate_response` | Post-generation | Verify the LLM's reply is grounded in the retrieved FAQ content |
-| `OutputGuardrail` | Post-generation | Catch degenerate LLM outputs (empty, too short) |
+A few rules shape every reply:
 
-The FAQ guardrails are the most important. They enforce a hard boundary: Capper will not speculate about the referral program. If the LLM produces a response that doesn't overlap meaningfully with the retrieved FAQ content, it is replaced with a fallback. This is a conservative but correct choice for a consumer-facing product where incorrect referral information could cause real user harm (e.g. a user acting on wrong bonus information).
+Answer the actual question first, then add context if useful
+Never claim to know something outside the product catalog or the FAQ
+Keep the language plain — no jargon, no markdown formatting in the reply itself
+Keep it short — a sentence or two plus any data, since this is mostly read on a phone
 
----
 
-## 6. Conversation Design Principles
+6.2 When Capper Can't Help
+If someone asks something totally outside scope — "what's the weather today?" — that falls into the small-talk category, and the model naturally steers the conversation back toward what it can actually help with.
 
-### 6.1 Capper's Persona
+If it's a referral-sounding question that doesn't match anything in the actual FAQ, Capper says so directly with a clear message about what it can help with, rather than trying to sound helpful and guessing. Being upfront about the boundary is better than a confident-sounding wrong answer.
 
-Capper is friendly, concise, and task-focused. The name and personality are intentionally simple — a mascot-style assistant that feels approachable to a broad consumer audience including families and students.
 
-Design rules for Capper's responses:
-- Always answer the question directly before adding context
-- Never claim to know something outside the product catalog or FAQ
-- Use plain language — no jargon, no markdown formatting in replies
-- Keep responses short (1–4 sentences + data) — mobile screens are small
+6.3 Remembering the Conversation
+Every message is saved along with which conversation it belongs to. Right now, though, each new message is handled on its own — Capper doesn't look back at earlier messages in the same conversation before replying. That's a deliberate simplification for this first version.
 
----
+The groundwork for changing that is already there, since every message is stored with a link back to its conversation. Teaching Capper to actually read back over the last few turns before replying is a natural next step, not a rebuild.
 
-### 6.2 Handling Out-of-Scope Questions
 
-When a user asks something Capper cannot answer (e.g. "What's the weather today?"), the system returns a `GENERAL` intent response. The LLM is prompted as Capper and will naturally redirect the user toward what it can help with.
+6.4 Using Where the Chat Was Opened From
+The entry_point field is a small but useful signal — someone opening the chat from the referral screen is very likely about to ask a referral question. Later on, this could be used to:
 
-For FAQ questions that don't match the allowed topic list, the `FAQGuardrail` returns an explicit HTTP 400 with a message explaining what Capper can help with. This is intentionally transparent — it is better to tell the user what the agent cannot do than to generate a plausible-sounding but wrong answer.
+Guess the topic before the first message even arrives
+Tailor the greeting to match
+Skip the classification step entirely for that first message
 
----
 
-### 6.3 Multi-Turn Conversations
+7. Privacy Considerations
+7.1 What Gets Saved
+Every conversation and message is stored. Here's what that includes:
 
-All messages are persisted to the database with their conversation ID. The current implementation does not inject conversation history into the LLM prompt — each message is processed independently. This is a deliberate simplification for v1.
+Data
+Saved?
+Notes
+Who's asking
+Yes
+Currently a placeholder value; in production this would come from a verified login, never something the app just claims
+Where the chat was opened from
+Yes
+Just tells you which screen — no personal information
+The actual message text
+Yes
+Full text of everything the user and Capper say
+What kind of question it was
+Yes
+The category each message was sorted into
+When it happened
+Yes
+Timestamped in UTC
 
-The infrastructure for multi-turn context is already in place (messages table with conversation_id FK). Injecting the last N turns into the system prompt is a straightforward v2 addition.
 
----
+The message text itself is the sensitive part. Someone might mention something personal in passing — "I'm shopping for my daughter's school," for instance — and that should be treated with the same care as any other personal information in a real deployment.
 
-### 6.4 Entry Point as Context Signal
 
-The `entry_point` field is a lightweight mechanism for the app to signal user intent before the first message is sent. A user who opens the chat from the referral page is almost certainly going to ask a referral question. Future versions can use this to:
-- Pre-classify the first message
-- Customize the greeting
-- Skip the intent classification step for the first turn
+7.2 What to Do Before This Goes to Production
+Don't log the raw message text anywhere outside the main database — logs and monitoring tools should only ever see message IDs and categories, not the actual words.
+Encrypt the database at rest, or move to a managed database service that handles this by default.
+Set a retention limit — conversations shouldn't be kept forever. Something like 90 days is a reasonable starting point.
+Be careful what reaches the AI provider — check OpenAI's data policy, and consider stripping obvious personal details out of a message before it's sent to the model at all.
+Never trust a client-supplied identity — who's asking should always come from a verified login token, not something the app just states.
+Always use HTTPS — the local setup used for building this is fine for development, but real traffic needs to be encrypted end to end.
 
----
 
-## 7. Privacy Considerations
+7.3 What Happens to Data Sent to OpenAI
+Messages sent to GPT-4o-mini fall under OpenAI's own data policies. As things stand, OpenAI doesn't use API traffic to train its models — but that's worth double-checking and writing down formally before shipping anything real. Given that Carton Caps' audience skews toward families and schools, it's also worth having a proper data agreement in place with OpenAI given the likelihood that some messages relate to minors, even indirectly.
 
-### 7.1 What Data Is Stored
 
-Every conversation and message is persisted to the SQLite database. The stored fields are:
+8. Trade-offs & Alternatives Considered
+8.1 Matching Keywords vs. Letting the Model Decide the Topic
+What was built: the topic of a message is decided by matching against a list of keywords.
 
-| Data | Stored | Notes |
-|---|---|---|
-| `user_id` | Yes | Currently a hardcoded demo value. In production, derived from auth token — never client-supplied. |
-| `entry_point` | Yes | App surface only — no PII |
-| Message content | Yes | Full text of every user message and assistant reply |
-| Intent label | Yes | Classified intent per message |
-| Timestamps | Yes | UTC, message-level |
+The alternative: ask the model itself to figure out the topic.
 
-**Message content is the most sensitive field.** Users may include personal information in their messages (e.g. "I'm buying snacks for my daughter's school"). This should be treated as PII in a production system.
+Why keyword matching won out:
 
----
+No extra delay — there's no additional call involved
+No extra cost — no extra tokens spent
+Always predictable — the same message always lands in the same category
+Simple to reason about and to extend
 
-### 7.2 Recommendations for Production
+Where it falls short: paraphrasing breaks it. "What can I purchase?" won't trigger the product keywords the way "what snacks do you have" would. Having the model do this classification instead would handle that naturally — this is the most likely first thing to upgrade.
 
-- **Do not log raw message content** to application logs or monitoring systems. Log only message IDs and intents.
-- **Encrypt the SQLite database at rest** or migrate to a managed database (RDS, Aurora) with encryption enabled.
-- **Apply a retention policy** — conversation data should not be stored indefinitely. A 90-day rolling deletion policy is a reasonable starting point.
-- **Do not send PII to OpenAI** — review OpenAI's data usage policy. If users may include sensitive information in messages, consider a PII scrubbing step in `InputGuardrail` before the message is sent to the LLM.
-- **Auth token validation** — the `user_id` must be extracted from a verified JWT, never from the request body.
-- **HTTPS only** — all API traffic must be encrypted in transit. The current `localhost` setup is for development only.
 
----
+8.2 A Plain Text File vs. a Real Search Index for the FAQ
+What was built: the FAQ lives in a plain text file, matched by keyword.
 
-### 7.3 OpenAI Data Handling
+The alternative: put the FAQ into a proper search index that finds answers by meaning rather than exact wording.
 
-Messages sent to GPT-4o-mini via the OpenAI API are subject to OpenAI's data usage policies. By default, OpenAI does not use API data for model training (as of their current policy), but this should be confirmed and documented for any production deployment. Consider a Data Processing Agreement (DPA) with OpenAI if handling data from minors, given Carton Caps' school-focused audience.
+Why the plain file won out:
 
----
+There are only 11 FAQ entries — a search index would be overkill at this size
+Nothing extra to set up or maintain
+Keyword matching works fine when the content is this small and well organized
 
-## 8. Trade-offs & Alternatives Considered
+Where it falls short: once the FAQ grows past a few dozen entries, or covers more varied topics, keyword matching starts missing things — especially when someone phrases a question in words that don't overlap with the answer (like asking about "gaming the system" when the actual FAQ section is titled "abuse and restrictions"). That's when a real search index earns its keep.
 
-### 8.1 Keyword Intent Classification vs. LLM Classification
 
-**Current approach:** Keyword matching in `RecommendationService`.
+8.3 A Simple Local Database vs. a Production Database
+What was built: everything runs on a single SQLite file.
 
-**Alternative:** Use the LLM itself to classify intent (zero-shot or few-shot classification prompt).
+Why: no setup required, easy to move around, plenty for a small service running on one machine during development.
 
-**Why keyword matching was chosen:**
-- Zero latency — no extra API call
-- Zero cost — no tokens consumed
-- Fully deterministic — same input always produces same intent
-- Easy to debug and extend
+What changes in production: moving to something like PostgreSQL is essentially a one-line configuration change, not a rewrite, thanks to the way the database layer is built.
 
-**The trade-off:** Keyword matching fails on paraphrases. "What can I purchase?" won't match the product keywords. An LLM classifier would handle this naturally. This is the most likely first upgrade in v2.
 
----
+8.4 Answering Each Message on Its Own vs. Remembering the Conversation
+What was built: each message is handled independently — Capper doesn't look back at what was said earlier in the same conversation.
 
-### 8.2 File-Based FAQ vs. Vector Database
+The cost of that: if someone asks "what about the second one?" right after seeing a product list, Capper has no way to know what "the second one" refers to.
 
-**Current approach:** `faqs.txt` loaded into memory, keyword-matched by section.
+Why that was an acceptable trade-off for now: feeding the whole conversation history into every request adds cost, adds delay, and requires care to avoid overflowing what the model can handle at once. Since most questions Capper gets are self-contained, skipping this for now was a reasonable simplification — and because every message is already saved, adding this later is a contained change, not something that requires rebuilding the system.
 
-**Alternative:** Embed FAQ sections into a vector database (Pinecone, pgvector, ChromaDB) and retrieve by semantic similarity.
 
-**Why file-based was chosen:**
-- 11 FAQ entries — vector search is unnecessary overhead at this scale
-- No infrastructure dependency — no vector DB to provision or maintain
-- Keyword matching is sufficient when the FAQ is small and well-structured
+9. Evolution Roadmap
+Ordered roughly by how much value each change adds versus how much work it takes.
+Near-term (v2)
+Change
+Why it matters
+Let Capper see the last few messages in the conversation
+Makes follow-up questions like "what about the second one?" actually answerable
+Let the model decide the topic instead of keyword matching
+Handles paraphrased questions the keyword list currently misses
+Add a way to fetch past messages in a conversation
+Lets the app restore chat history when someone reopens it
+Real user logins
+Replace the placeholder user ID with an actual verified identity
 
-**The trade-off:** As the FAQ grows (50+ entries, multiple document types), keyword matching degrades. Semantic search becomes necessary when users ask questions that don't share vocabulary with the answer (e.g. "Can I get in trouble for gaming the system?" → should match the abuse/restriction FAQ).
+Medium-term (v3)
+Change
+Why it matters
+Move to a production database
+Handles real traffic, concurrent use, and encryption properly
+Search the FAQ by meaning, not just keywords
+Keeps working as the FAQ grows and covers more ground
+Use where the chat was opened from to guess the topic upfront
+Less friction for someone who's clearly there for one specific thing
+Stream replies as they're generated
+Feels faster on mobile — text appears as it's written instead of all at once
 
----
+Longer-term
+Change
+Why it matters
+Remember things about a specific user over time
+"You asked about granola bars last week — we just got a new one"
+A real recommendation engine
+Move beyond keyword search toward genuinely personalized suggestions
+Let users react to replies (thumbs up/down)
+Gives a real signal for improving reply quality over time
+Test different prompt versions against each other
+Systematically improve tone, accuracy, and how often people act on Capper's suggestions
+Hand off to a real person when Capper can't help
+Gives users a way out when the agent genuinely can't answer
 
-### 8.3 SQLite vs. Production Database
 
-**Current approach:** SQLite file on disk.
-
-**Why SQLite was chosen:** Zero setup, portable, sufficient for a single-instance development service.
-
-**Production path:** Migrate to PostgreSQL (RDS or Aurora Serverless). The SQLAlchemy abstraction means this is a one-line change to `DATABASE_URL` — no application code changes required.
-
----
-
-### 8.4 Stateless Message Processing vs. Conversation History in Prompt
-
-**Current approach:** Each message is processed independently. No history is injected into the LLM prompt.
-
-**Trade-off:** The LLM cannot refer back to earlier turns. If a user asks "What about the second one?" after a product list, Capper won't know what "the second one" refers to.
-
-**Why this was accepted for v1:** Injecting history adds tokens (cost + latency) and requires careful truncation logic to avoid exceeding context limits. For a task-oriented agent where most queries are self-contained, stateless processing is a reasonable v1 simplification. The database already stores the full history — wiring it into the prompt is a contained v2 change.
-
----
-
-## 9. Evolution Roadmap
-
-These are ordered by impact vs. implementation effort.
-
-### Near-term (v2)
-
-| Change | Why |
-|---|---|
-| Inject last N conversation turns into LLM prompt | Enables true multi-turn context — "What about the second one?" becomes answerable |
-| Replace keyword intent classifier with LLM zero-shot classification | Handles paraphrases and edge cases the keyword list misses |
-| Add `GET /v1/chat/conversations/{id}/messages` endpoint | Allows the app to restore chat history on re-open |
-| JWT authentication | Replace hardcoded `user_id` with real user identity |
-
-### Medium-term (v3)
-
-| Change | Why |
-|---|---|
-| Migrate to PostgreSQL | Production-grade persistence, concurrent writes, encryption at rest |
-| Semantic FAQ retrieval (vector embeddings) | Handles a growing FAQ corpus and vocabulary mismatch |
-| `entry_point`-aware greeting and pre-classification | Reduces friction for users who open chat from a specific context |
-| Streaming responses | Improves perceived latency on mobile — text appears as it generates |
-
-### Longer-term
-
-| Change | Why |
-|---|---|
-| Per-user conversation history and personalization | "You asked about granola bars last week — we have a new one" |
-| Product recommendation engine integration | Move beyond keyword search to collaborative filtering or embeddings |
-| Feedback loop (thumbs up/down on replies) | Collect signal to evaluate and improve response quality over time |
-| A/B testing framework for prompts | Systematically improve Capper's tone, accuracy, and conversion |
-| Fallback to human support | For queries Capper cannot handle, offer a handoff to a human agent |
