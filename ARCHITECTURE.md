@@ -131,6 +131,41 @@ Loads `data/faqs.txt` into memory and splits it into sections by double newline.
 
 ---
 
+## Data Flow Diagram
+
+```mermaid
+flowchart TD
+    U(["User Message"])
+    HR(["HTTP Response"])
+
+    U --> IG["InputGuardrail\nStrip · Reject empty / >1000 chars"]
+    IG -->|"sanitized text"| IC["RecommendationService\nClassify Intent"]
+
+    IC -->|"PRODUCT_QUERY"| SR["SQLRetriever\nKeyword search → Products table"]
+    IC -->|"FAQ_QUERY"| FGQ["FAQGuardrail.validate_query\nBlock off-topic questions"]
+    IC -->|"GENERAL"| PB
+
+    SR -->|"product rows"| PB
+    FGQ -->|"allowed"| FR["FAQRetriever\nKeyword search → faqs.txt"]
+    FR -->|"FAQ sections"| PB
+
+    PB["PromptTemplates\nBuild system prompt with injected facts"]
+    PB -->|"system prompt + user message"| LLM["LLMClient\nOpenAI GPT-4o-mini"]
+
+    LLM -->|"raw reply"| OV{"Intent?"}
+    OV -->|"FAQ_QUERY"| FGR["FAQGuardrail.validate_response\nWord overlap check"]
+    OV -->|"PRODUCT / GENERAL"| OG["OutputGuardrail\nLength check · Fallback"]
+
+    FGR -->|"clean reply"| REPO
+    OG -->|"clean reply"| REPO
+
+    REPO["Repository\nSave user message + assistant message"]
+    REPO --> DB[("SQLite\nconversations · messages · Products")]
+    REPO --> HR
+```
+
+---
+
 ## LLM Integration
 
 - Provider: OpenAI
